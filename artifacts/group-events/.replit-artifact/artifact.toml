@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Gather — Group Events"
+description = "A Slack-connected events calendar for teams and clubs. It extracts planned events from group conversations, lets admins publish events, and gives each member control over their personal calendar."
+version = "1.0.0"
+id = "artifacts/group-events"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24478
+
+[services.development]
+run = "pnpm --filter @workspace/group-events run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/group-events", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/group-events/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24478"
+BASE_PATH = "/"
