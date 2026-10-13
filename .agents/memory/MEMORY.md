@@ -1,0 +1,1 @@
+- [Slack calendar sync](slack-calendar-sync.md) — keep polling scoped to the selected conversation; store extracted event details and source references, not message history.
