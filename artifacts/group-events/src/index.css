@@ -397,3 +397,11 @@
     inset: -1px;
   }
 }
+
+/* Demo: highlight whatever Slack or the E-board just changed */
+.flash-row { animation: flash-row 2.4s ease both; }
+.flash-chip { animation: flash-chip 2.4s ease both; }
+@keyframes flash-row { 0%, 30% { background-color: #fff3d6; } 100% { background-color: transparent; } }
+@keyframes flash-chip { 0%, 40% { outline: 2px solid #d4a12a; outline-offset: 1px; } 100% { outline: 2px solid transparent; outline-offset: 1px; } }
+.live-dot { animation: live-dot 1.6s ease-in-out infinite; }
+@keyframes live-dot { 50% { opacity: .35; } }
