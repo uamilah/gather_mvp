@@ -1,26 +1,25 @@
 // In-browser stand-in for the backend. State lives in localStorage and syncs
 // live across tabs, so an E-board tab and a member tab update each other.
 import { useSyncExternalStore } from "react";
-import { extract } from "./extract";
-import { aiExtract, getApiKey, type AiAction } from "./ai";
-import { addDays, formatDay, formatTime } from "./dates";
-import { demoScript, seedEvents, seedMessages } from "./seed";
+import { aiChatTurn, type CalendarAction } from "./ai";
+import { formatDay, formatTime } from "./dates";
+import { PEOPLE, seedEvents, seedMessages } from "./seed";
 import type { Change, Event, EventInput, SlackMessage } from "./types";
 
 type State = {
   events: Event[];
   prefs: Record<string, boolean>; // eventId -> on my calendar
   messages: SlackMessage[];
-  scriptIndex: number;
+  typing: { clubId: string; author: string } | null;
   lastTouched: { eventId: string; at: number } | null;
 };
 
-const KEY = "gather.demo.v1";
+const KEY = "gather.demo.v2";
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 function fresh(): State {
   const { events, prefs } = seedEvents();
-  return { events, prefs, messages: seedMessages(), scriptIndex: 0, lastTouched: null };
+  return { events, prefs, messages: seedMessages(), typing: null, lastTouched: null };
 }
 
 function load(): State {
@@ -67,7 +66,7 @@ export function getSnapshot() {
 }
 
 export function isIncluded(s: State, event: Event) {
-  return s.prefs[event.id] ?? event.mandatory;
+  return s.prefs[event.id] ?? true; // Gather adds club events by default; you remove what you don't want
 }
 
 // ---- E-board actions ----
@@ -116,53 +115,17 @@ export function setIncluded(id: string, included: boolean) {
   commit({ ...state, prefs: { ...state.prefs, [id]: included } });
 }
 
-// ---- Slack simulation ----
-
-export function scriptLength() {
-  return demoScript().length;
-}
+// ---- Chat (AI plays the other club members) ----
 
 function postMessage(message: SlackMessage) {
   commit({ ...state, messages: [...state.messages, message] });
 }
 
-export function playNextMessage(): SlackMessage | null {
-  const step = demoScript()[state.scriptIndex];
-  if (!step) return null;
-  const messageId = `m-${uid()}`;
-  let result: SlackMessage["result"] = { kind: "ignored" };
-  const action = step.action;
-  if (action.kind === "create") {
-    if (!state.events.some((event) => event.id === action.id)) createEvent(action.input, "slack", messageId, action.id);
-    result = { kind: "created", eventId: action.id };
-  } else if (action.kind === "update" && state.events.some((event) => event.id === action.id)) {
-    updateEvent(action.id, action.patch, "slack");
-    result = { kind: "updated", eventId: action.id };
-  } else if (action.kind === "cancel" && state.events.some((event) => event.id === action.id)) {
-    cancelEvent(action.id, "slack");
-    result = { kind: "cancelled", eventId: action.id };
-  }
-  const message: SlackMessage = { id: messageId, clubId: step.clubId, author: step.author, role: step.role, text: step.text, at: Date.now(), result };
-  commit({ ...state, messages: [...state.messages, message], scriptIndex: state.scriptIndex + 1 });
-  return message;
+function setMessageResult(id: string, result: SlackMessage["result"]) {
+  commit({ ...state, messages: state.messages.map((message) => message.id === id ? { ...message, result } : message) });
 }
 
-// A message typed live by whoever is demoing.
-function localAction(clubId: string, text: string): AiAction {
-  const found = extract(text);
-  const recent = [...state.events].filter((event) => event.clubId === clubId && !event.cancelled).sort((a, b) => b.updatedAt - a.updatedAt);
-  const target = found.title ? recent.find((event) => sharesWord(event.title, found.title!)) ?? recent[0] : recent[0];
-  if (found.intent === "cancel" && target) return { action: "cancel", eventId: target.id };
-  if (found.intent === "update" && target && (found.date || found.startTime || found.location)) {
-    return { action: "update", eventId: target.id, ...(found.date && { date: found.date }), ...(found.startTime && { startTime: found.startTime }), ...(found.location && { location: found.location }) };
-  }
-  if (found.date || found.startTime) {
-    return { action: "create", title: found.title ?? "New event", date: found.date ?? addDays(0), startTime: found.startTime, location: found.location ?? "Location TBD", type: found.type, mandatory: found.mandatory };
-  }
-  return { action: "none" };
-}
-
-function applyAction(clubId: string, messageId: string, act: AiAction): SlackMessage["result"] {
+function applyAction(clubId: string, messageId: string, act: CalendarAction): SlackMessage["result"] {
   const exists = act.eventId && state.events.some((event) => event.id === act.eventId);
   if (act.action === "cancel" && exists) {
     cancelEvent(act.eventId!, "slack");
@@ -171,7 +134,7 @@ function applyAction(clubId: string, messageId: string, act: AiAction): SlackMes
   if (act.action === "update" && exists) {
     const patch: Partial<EventInput> = {};
     if (act.title) patch.title = act.title;
-    if (act.date) patch.date = act.date;
+    if (act.date && /^\d{4}-\d{2}-\d{2}$/.test(act.date)) patch.date = act.date;
     if (act.startTime !== undefined) patch.startTime = act.startTime;
     if (act.location) patch.location = act.location;
     if (act.mandatory !== undefined) patch.mandatory = act.mandatory;
@@ -191,32 +154,38 @@ function applyAction(clubId: string, messageId: string, act: AiAction): SlackMes
     }, "slack", messageId);
     return { kind: "created", eventId: event.id };
   }
-  return { kind: "ignored" };
+  return null;
 }
 
-// A message typed live in the chat. It appears at once as "reading", then the
-// AI (or the built-in extractor when no key is set) decides what it means.
-export async function postOwnMessage(clubId: string, author: string, role: string, text: string): Promise<SlackMessage> {
-  const messageId = `m-${uid()}`;
-  postMessage({ id: messageId, clubId, author, role, text, at: Date.now(), result: null });
-  let act: AiAction;
-  let via: "ai" | "local" = "local";
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+// You post; the AI answers as club members (with typing), then Gather acts on the
+// conversation. Returns the calendar result, if any, for the extension popup.
+export async function sendMessage(clubId: string, text: string): Promise<{ result: SlackMessage["result"]; error?: string }> {
+  postMessage({ id: `m-${uid()}`, clubId, author: "You", role: "Member", text, at: Date.now(), result: null });
+  const people = PEOPLE[clubId];
+  commit({ ...state, typing: { clubId, author: people[0].name } });
   try {
-    if (!getApiKey()) throw new Error("no key");
-    act = await aiExtract(clubId, author, text, state.events.filter((event) => event.clubId === clubId));
-    via = "ai";
-  } catch {
-    act = localAction(clubId, text);
+    const turn = await aiChatTurn(clubId, state.messages.filter((m) => m.clubId === clubId), state.events.filter((e) => e.clubId === clubId));
+    let lastId = state.messages[state.messages.length - 1].id;
+    for (const [i, reply] of turn.replies.entries()) {
+      commit({ ...state, typing: { clubId, author: reply.author } });
+      await wait(i === 0 ? 500 : Math.min(600 + reply.text.length * 25, 2200));
+      const person = people.find((p) => p.name === reply.author) ?? people[0];
+      lastId = `m-${uid()}`;
+      commit({ ...state, typing: null, messages: [...state.messages, { id: lastId, clubId, author: person.name, role: person.role, text: reply.text, at: Date.now(), result: null }] });
+    }
+    commit({ ...state, typing: null });
+    const result = applyAction(clubId, lastId, turn.calendar);
+    if (result) {
+      await wait(350);
+      setMessageResult(lastId, result);
+    }
+    return { result };
+  } catch (error) {
+    commit({ ...state, typing: null });
+    return { result: null, error: error instanceof Error ? error.message : "Something went wrong" };
   }
-  const result = applyAction(clubId, messageId, act);
-  commit({ ...state, messages: state.messages.map((message) => message.id === messageId ? { ...message, result, via } : message) });
-  return state.messages.find((message) => message.id === messageId)!;
-}
-
-function sharesWord(a: string, b: string) {
-  const words = (s: string) => new Set(s.toLowerCase().split(/\W+/).filter((w) => w.length > 3));
-  const wa = words(a);
-  return [...words(b)].some((w) => wa.has(w));
 }
 
 export function resetDemo() {

@@ -4,6 +4,7 @@ import { formatTime, iso } from "@/demo/dates";
 import type { Event } from "@/demo/types";
 
 type Props = {
+  tall?: boolean;
   month: Date; // any day in the month to show
   events: Event[];
   flashId: string | null;
@@ -12,7 +13,7 @@ type Props = {
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-export function MonthGrid({ month, events, flashId, onOpen }: Props) {
+export function MonthGrid({ tall = false, month, events, flashId, onOpen }: Props) {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
   const start = new Date(first);
   start.setDate(1 - first.getDay());
@@ -40,7 +41,7 @@ export function MonthGrid({ month, events, flashId, onOpen }: Props) {
           const inMonth = d.getMonth() === month.getMonth();
           const dayEvents = (byDay[key] ?? []).sort((a, b) => (a.startTime ?? "").localeCompare(b.startTime ?? ""));
           return (
-            <div key={key} className={`min-h-[64px] p-1 sm:min-h-[86px] sm:p-1.5 ${inMonth ? "bg-[#fbfaf6]" : "bg-[#f4f1e9]"}`}>
+            <div key={key} className={`min-h-[64px] p-1 sm:p-1.5 ${tall ? "sm:min-h-[104px]" : "sm:min-h-[86px]"} ${inMonth ? "bg-[#fbfaf6]" : "bg-[#f4f1e9]"}`}>
               <div className={`mb-1 flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-bold ${key === todayKey ? "bg-[#252c41] text-white" : inMonth ? "text-[#4a515d]" : "text-[#b5b3aa]"}`}>{d.getDate()}</div>
               {/* Phones: coloured dots. Larger screens: labelled chips. */}
               <div className="flex flex-wrap gap-0.5 sm:hidden">

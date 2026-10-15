@@ -33,6 +33,5 @@ export type SlackMessage = {
   text: string;
   at: number;
   // What Gather did with it: created/updated/cancelled an event, or nothing.
-  via?: "ai" | "local";
-  result: { kind: "created" | "updated" | "cancelled"; eventId: string } | { kind: "ignored" } | null;
+  result: { kind: "created" | "updated" | "cancelled"; eventId: string } | null;
 };

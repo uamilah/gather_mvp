@@ -1,159 +1,116 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ErrorBoundary } from "@/components/error-boundary";
 import NotFound from "@/pages/not-found";
 import { Route, Switch, useLocation, Router as WouterRouter } from "wouter";
-import {
-  ArrowLeft,
-  ArrowRight,
-  Ban,
-  CalendarDays,
-  Check,
-  CircleCheck,
-  Download,
-  LayoutGrid,
-  List,
-  MessageSquareText,
-  Pencil,
-  Plus,
-  RotateCcw,
-  Sparkles,
-  Trash2,
-  UsersRound,
-  X,
-} from "lucide-react";
+import { Ban, CalendarDays, MessageSquareText, Pencil, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
+import { BrowserWindow } from "@/components/BrowserWindow";
+import { CalendarPage } from "@/components/CalendarPage";
 import { EventEditor } from "@/components/EventEditor";
-import { EventRow, RequiredChip, TypeChip } from "@/components/EventRow";
-import { MonthGrid } from "@/components/MonthGrid";
-import { ChatApp } from "@/components/ChatApp";
-import { UpcomingPanel } from "@/components/UpcomingPanel";
+import { RequiredChip, TypeChip } from "@/components/EventRow";
+import { ExtensionPopup, type Highlight } from "@/components/ExtensionPopup";
+import { PhoneSlack } from "@/components/PhoneSlack";
+import { Stage } from "@/components/Stage";
 import { REQUIRED, TYPE_STYLE } from "@/demo/colors";
+import { AI_MODEL, aiSummary, getApiKey, setApiKey } from "@/demo/ai";
 import { formatDay, formatTime, parseIso } from "@/demo/dates";
 import { downloadIcs } from "@/demo/ics";
-import { AI_MODEL, aiSummary, getApiKey, setApiKey } from "@/demo/ai";
-import { CLUBS, clubById, demoScript } from "@/demo/seed";
-import {
-  cancelEvent,
-  createEvent,
-  deleteEvent,
-  getSnapshot,
-  isIncluded,
-  playNextMessage,
-  postOwnMessage,
-  resetDemo,
-  scriptLength,
-  setIncluded,
-  updateEvent,
-  useDemo,
-} from "@/demo/store";
-import { summarize, type Summary } from "@/demo/summary";
-import { EVENT_TYPES, type Event, type EventInput, type SlackMessage } from "@/demo/types";
+import { clubById } from "@/demo/seed";
+import { cancelEvent, createEvent, deleteEvent, isIncluded, resetDemo, sendMessage, setIncluded, updateEvent, useDemo } from "@/demo/store";
+import type { Summary } from "@/demo/summary";
+import type { Event, EventInput } from "@/demo/types";
 
 type Mode = "member" | "board";
 
+// Scene size before scaling: phone (418) + gap + browser (1100).
+const SCENE_W = 1600;
+const SCENE_H = 920;
+
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => window.innerWidth < 820);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 820);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return narrow;
+}
+
 function Home() {
   const demo = useDemo();
+  const narrow = useNarrow();
+  const [side, setSide] = useState<"phone" | "browser">("phone");
   const [mode, setMode] = useState<Mode>("member");
-  const [pane, setPane] = useState<"chat" | "app">("chat"); // phones show one side at a time
-  const [view, setView] = useState<"month" | "list">("month");
-  const [scope, setScope] = useState<"all" | "mine">("all");
   const [hiddenClubs, setHiddenClubs] = useState<Set<string>>(new Set());
   const [monthOffset, setMonthOffset] = useState(0);
+  const [popupOpen, setPopupOpen] = useState(false);
+  const [highlight, setHighlight] = useState<Highlight | null>(null);
+  const [badge, setBadge] = useState(0);
   const [editor, setEditor] = useState<{ open: boolean; event: Event | null }>({ open: false, event: null });
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; eventId?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [apiKey, setKeyState] = useState(getApiKey);
-  const [aiSum, setAiSum] = useState<Summary | null>(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const noticeTimer = useRef<number | undefined>(undefined);
-  const aiOn = !!apiKey;
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryNonce, setSummaryNonce] = useState(0);
 
-  const memberScope = mode === "member" ? scope : "all";
-  const visibleEvents = useMemo(() => demo.events.filter((event) => !hiddenClubs.has(event.clubId) && (memberScope === "all" || isIncluded(demo, event))), [demo, hiddenClubs, memberScope]);
-  const summaryScope = memberScope;
-  const summaryEvents = visibleEvents;
-  const localSummary = useMemo(() => summarize(summaryEvents, summaryScope), [summaryEvents, summaryScope]);
+  const included = (event: Event) => isIncluded(demo, event);
+  const myEvents = useMemo(() => demo.events.filter((event) => isIncluded(demo, event) && !hiddenClubs.has(event.clubId)), [demo, hiddenClubs]);
+  const flashId = demo.lastTouched && Date.now() - demo.lastTouched.at < 4000 ? demo.lastTouched.eventId : null;
+  const detail = demo.events.find((event) => event.id === detailId) ?? null;
 
-  // Ask the AI for a fresh summary whenever the week's events change.
-  const summarySig = JSON.stringify(summaryEvents.map((e) => [e.id, e.title, e.date, e.startTime, e.location, e.cancelled, e.mandatory]));
+  // Refresh the AI summary when the week on the student's calendar changes.
+  const sig = JSON.stringify(myEvents.map((e) => [e.id, e.title, e.date, e.startTime, e.location, e.cancelled, e.mandatory]));
   useEffect(() => {
-    if (!aiOn) { setAiSum(null); return; }
     let alive = true;
-    setAiLoading(true);
+    setSummaryLoading(true);
     const timer = window.setTimeout(() => {
-      aiSummary(summaryEvents, summaryScope)
-        .then((result) => { if (alive) setAiSum(result.headline ? result : null); })
-        .catch(() => { if (alive) setAiSum(null); })
-        .finally(() => { if (alive) setAiLoading(false); });
-    }, 600);
+      aiSummary(myEvents)
+        .then((result) => { if (alive) setSummary(result); })
+        .catch(() => { if (alive) setSummary({ headline: "Connect AI to get your weekly summary.", bullets: [], count: 0, required: 0 }); })
+        .finally(() => { if (alive) setSummaryLoading(false); });
+    }, 500);
     return () => { alive = false; window.clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [summarySig, summaryScope, aiOn]);
+  }, [sig, summaryNonce]);
 
-  const month = new Date();
-  month.setDate(1);
-  month.setMonth(month.getMonth() + monthOffset);
-  const monthLabel = new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(month);
-  const monthKey = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}`;
-  const monthEvents = visibleEvents.filter((event) => event.date.startsWith(monthKey));
-  const listEvents = [...monthEvents].sort((a, b) => a.date.localeCompare(b.date) || (a.startTime ?? "99").localeCompare(b.startTime ?? "99"));
-  const grouped = listEvents.reduce<Record<string, Event[]>>((acc, event) => {
-    (acc[event.date] ??= []).push(event);
-    return acc;
-  }, {});
-  const myCount = demo.events.filter((event) => isIncluded(demo, event) && !event.cancelled).length;
-  const detail = demo.events.find((event) => event.id === detailId) ?? null;
-  const flashId = demo.lastTouched && Date.now() - demo.lastTouched.at < 4000 ? demo.lastTouched.eventId : null;
-  const nextScript = demoScript()[demo.scriptIndex];
-
-  const flash = (text: string, eventId?: string) => {
-    setNotice({ text, eventId });
-    window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(null), 3800);
-  };
-
-  // Jump the calendar to the month of anything the chat just touched.
-  const jumpTo = (date: string) => {
+  function jumpTo(date: string) {
     const now = new Date();
     const target = parseIso(date);
     setMonthOffset((target.getFullYear() - now.getFullYear()) * 12 + target.getMonth() - now.getMonth());
-  };
-
-  function reactToChat(message: SlackMessage | null) {
-    if (!message?.result || message.result.kind === "ignored") return;
-    const club = clubById(message.clubId);
-    const eventId = message.result.eventId;
-    // Read the store directly: the action just ran, so `demo` is one render behind.
-    const fresh = getSnapshot().events.find((item) => item.id === eventId);
-    if (fresh) jumpTo(fresh.date);
-    const verb = { created: "New event from", updated: "Updated from", cancelled: "Cancelled in" }[message.result.kind];
-    flash(`${verb} #${club.channel}${fresh ? `: ${fresh.title}` : ""}`, fresh?.id);
   }
 
-  function saveEvent(input: EventInput) {
-    if (editor.event) {
-      updateEvent(editor.event.id, input);
-      flash("Event updated. Members see the change right away");
-    } else {
-      const created = createEvent(input);
-      jumpTo(created.date);
-      flash("Event added to the club calendar", created.id);
+  async function send(clubId: string, text: string) {
+    setBusy(true);
+    setChatError(null);
+    const { result, error } = await sendMessage(clubId, text);
+    setBusy(false);
+    if (error) {
+      setChatError(error);
+      if (/key|connected/i.test(error)) setSettingsOpen(true);
+      return;
     }
-    setEditor({ open: false, event: null });
+    if (!result) return;
+    setHighlight({ eventId: result.eventId, kind: result.kind, at: Date.now() });
+    setBadge((count) => count + 1);
+    // Let the reply land in Slack first, then drop the extension open.
+    window.setTimeout(() => {
+      setPopupOpen(true);
+      setBadge(0);
+      if (narrow) setSide("browser");
+    }, 700);
   }
 
-  function removeEvent(event: Event) {
-    if (!window.confirm(`Delete “${event.title}” from the shared calendar?`)) return;
-    deleteEvent(event.id);
-    setDetailId(null);
-    flash("Event removed");
-  }
+  // When the popup opens on a new highlight, show its month on the calendar.
+  useEffect(() => {
+    if (!highlight) return;
+    const event = demo.events.find((item) => item.id === highlight.eventId);
+    if (event) jumpTo(event.date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlight?.at]);
 
   function toggle(event: Event) {
-    const next = !isIncluded(demo, event);
-    if (!next && event.mandatory && !window.confirm(`${event.title} is required by ${clubById(event.clubId).short}. Remove it from your calendar anyway?`)) return;
-    setIncluded(event.id, next);
-    flash(next ? `Added “${event.title}” to your calendar` : `Removed “${event.title}” from your calendar`);
+    setIncluded(event.id, !isIncluded(demo, event));
   }
 
   function toggleClub(id: string) {
@@ -164,129 +121,92 @@ function Home() {
     });
   }
 
-  function reset() {
-    resetDemo();
-    setMonthOffset(0);
-    flash("Demo reset");
+  function saveEvent(input: EventInput) {
+    if (editor.event) updateEvent(editor.event.id, input);
+    else {
+      const created = createEvent(input);
+      setHighlight({ eventId: created.id, kind: "created", at: Date.now() });
+      jumpTo(created.date);
+    }
+    setEditor({ open: false, event: null });
   }
 
-  const pill = (active: boolean) => `rounded-md px-3 py-1.5 text-xs font-bold transition ${active ? "bg-[#252c41] text-white shadow-sm" : "text-[#666d77] hover:text-[#252c41]"}`;
+  function reset() {
+    resetDemo();
+    setHighlight(null);
+    setPopupOpen(false);
+    setBadge(0);
+    setMonthOffset(0);
+    setChatError(null);
+  }
+
+  const phone = (
+    <PhoneSlack messages={demo.messages} events={demo.events} typing={demo.typing} busy={busy} error={chatError} onSend={(clubId, text) => void send(clubId, text)} onOpenEvent={(id) => { setDetailId(id); if (narrow) setSide("browser"); }} />
+  );
+
+  const browser = (
+    <BrowserWindow
+      badge={badge}
+      popupOpen={popupOpen}
+      onExtensionClick={() => { setPopupOpen(!popupOpen); setBadge(0); }}
+      popup={popupOpen && (
+        <ExtensionPopup
+          highlight={highlight}
+          events={demo.events}
+          included={included}
+          summary={summary}
+          summaryLoading={summaryLoading}
+          mode={mode}
+          onMode={setMode}
+          onToggle={toggle}
+          onOpen={setDetailId}
+          onEdit={(event) => setEditor({ open: true, event })}
+          onNew={() => setEditor({ open: true, event: null })}
+          onExport={() => downloadIcs(demo.events.filter((event) => isIncluded(demo, event) && !event.cancelled))}
+          onClose={() => setPopupOpen(false)}
+        />
+      )}
+    >
+      <CalendarPage events={myEvents} hiddenClubs={hiddenClubs} monthOffset={monthOffset} flashId={flashId} onMonth={setMonthOffset} onToggleClub={toggleClub} onOpen={(event) => setDetailId(event.id)} />
+      {editor.open && <EventEditor event={editor.event} onClose={() => setEditor({ open: false, event: null })} onSave={saveEvent} />}
+      {detail && <EventDetail event={detail} mode={mode} included={isIncluded(demo, detail)} sourceText={demo.messages.find((m) => m.result?.eventId === detail.id && m.result.kind === "created")?.text ?? null} onClose={() => setDetailId(null)} onToggle={() => toggle(detail)} onEdit={() => { setEditor({ open: true, event: detail }); setDetailId(null); }} onCancel={() => cancelEvent(detail.id)} onDelete={() => { deleteEvent(detail.id); setDetailId(null); }} />}
+    </BrowserWindow>
+  );
 
   return (
-    <div className="gather-shell flex h-[100dvh] flex-col">
-      <header className="z-20 flex h-[60px] shrink-0 items-center justify-between gap-2 border-b border-[#e2ddd2] bg-[#f4f1e9] px-3 md:px-5">
-        <div className="flex items-center gap-2.5">
-          <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-[#252c41] text-[#a1d2b6]"><CalendarDays size={18} strokeWidth={2.5} /><span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f1e9] bg-[#f0ae86]" /></div>
-          <span className="display-font text-xl font-extrabold tracking-[-.05em]">gather</span>
-          <span className="hidden rounded-full border border-[#d8d3c7] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[#7d8289] md:inline">Live demo</span>
+    <div className="desk flex h-[100dvh] flex-col">
+      <header className="flex h-[52px] shrink-0 items-center justify-between gap-3 px-4 md:px-6">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-[#252c41] text-[#a1d2b6]"><CalendarDays size={16} strokeWidth={2.5} /></span>
+          <span className="display-font text-[19px] font-extrabold tracking-[-.05em] text-[#252c41]">gather</span>
+          <span className="hidden truncate text-[13px] text-[#737984] md:inline">Text your club in Slack. Gather keeps your calendar in sync.</span>
         </div>
-        <div className="flex items-center rounded-lg border border-[#dfdbd0] bg-[#fbfaf6] p-1 lg:hidden">
-          <button onClick={() => setPane("chat")} className={pill(pane === "chat")}>Chat</button>
-          <button onClick={() => setPane("app")} className={pill(pane === "app")}>Gather</button>
-        </div>
+        {narrow && (
+          <div className="flex rounded-lg border border-[#dfdbd0] bg-[#fbfaf6] p-0.5 text-xs font-bold">
+            <button onClick={() => setSide("phone")} className={`rounded-md px-3 py-1.5 ${side === "phone" ? "bg-[#252c41] text-white" : "text-[#666d77]"}`}>Slack</button>
+            <button onClick={() => setSide("browser")} className={`relative rounded-md px-3 py-1.5 ${side === "browser" ? "bg-[#252c41] text-white" : "text-[#666d77]"}`}>Calendar{badge > 0 && <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-[#e8553e]" />}</button>
+          </div>
+        )}
         <div className="flex items-center gap-1.5">
-          <button onClick={() => setSettingsOpen(true)} className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-bold transition ${aiOn ? "border-[#d8ccf5] bg-[#f3eefe] text-[#6d4fc2]" : "border-[#dfdbd0] bg-[#fbfaf6] text-[#666d77] hover:text-[#252c41]"}`} data-testid="button-ai-settings"><Sparkles size={14} /><span className="hidden sm:inline">{aiOn ? "AI on" : "AI off"}</span></button>
-          <button onClick={reset} className="flex h-9 items-center gap-1.5 rounded-lg border border-[#dfdbd0] bg-[#fbfaf6] px-2.5 text-xs font-bold text-[#666d77] hover:text-[#252c41]" title="Reset demo" data-testid="button-reset"><RotateCcw size={14} /><span className="hidden sm:inline">Reset</span></button>
+          <button onClick={() => setSettingsOpen(true)} className="flex h-8 w-8 items-center justify-center rounded-lg text-[#737984] hover:bg-black/5" title="AI settings" aria-label="AI settings"><Sparkles size={15} /></button>
+          <button onClick={reset} className="flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-bold text-[#737984] hover:bg-black/5" title="Start over" data-testid="button-reset"><RotateCcw size={14} /><span className="hidden sm:inline">Start over</span></button>
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(420px,44%)_1fr]">
-        {/* Left: the group chat */}
-        <div className={`min-h-0 border-r border-[#e2ddd2] ${pane === "chat" ? "block" : "hidden"} lg:block`}>
-          <ChatApp
-            messages={demo.messages}
-            events={demo.events}
-            scriptIndex={demo.scriptIndex}
-            scriptLength={scriptLength()}
-            nextScriptClub={nextScript?.clubId ?? null}
-            aiOn={aiOn}
-            onPlayNext={() => reactToChat(playNextMessage())}
-            onSend={(clubId, author, role, text) => { void postOwnMessage(clubId, author, role, text).then(reactToChat); }}
-            onOpenEvent={(id) => { setDetailId(id); }}
-          />
-        </div>
-
-        {/* Right: Gather */}
-        <main className={`min-h-0 overflow-y-auto ${pane === "app" ? "block" : "hidden"} lg:block`}>
-          <div className="mx-auto max-w-[980px] px-4 pb-12 pt-5 md:px-6">
-            <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <p className="mono-font text-[10px] font-bold uppercase tracking-[.2em] text-[#43876e]">{mode === "member" ? "Every club, one calendar" : "E-board view"}</p>
-                <h1 className="display-font mt-1 text-[26px] font-extrabold leading-tight tracking-[-.05em] text-[#252c41] md:text-[32px]">{mode === "member" ? "Never miss what matters." : "Post once. Everyone's calendar updates."}</h1>
-              </div>
-              <div className="flex items-center rounded-lg border border-[#dfdbd0] bg-[#fbfaf6] p-1">
-                <button onClick={() => setMode("member")} className={pill(mode === "member")}>Member</button>
-                <button onClick={() => setMode("board")} className={pill(mode === "board")}>E-board</button>
-              </div>
-            </div>
-
-            <UpcomingPanel summary={aiOn && aiSum ? aiSum : localSummary} scope={summaryScope} loading={aiOn && aiLoading} source={aiOn && aiSum ? "ai" : "builtin"} />
-
-            <div className="mb-3 mt-5 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap gap-1.5">
-                {CLUBS.map((club) => (
-                  <button key={club.id} onClick={() => toggleClub(club.id)} className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold transition ${hiddenClubs.has(club.id) ? "border-[#ddd8cc] bg-transparent text-[#a2a29a]" : "border-transparent text-white"}`} style={hiddenClubs.has(club.id) ? undefined : { background: club.color }}>{!hiddenClubs.has(club.id) && <Check size={11} strokeWidth={3} />}{club.short}</button>
-                ))}
-              </div>
-              {mode === "member" ? (
-                <div className="flex items-center gap-1.5">
-                  <div className="flex items-center rounded-lg border border-[#ded9cd] bg-[#fbfaf6] p-0.5">
-                    <button onClick={() => setScope("all")} className={`rounded-md px-2.5 py-1.5 text-[11px] font-bold ${scope === "all" ? "bg-[#e5efe9] text-[#34745b]" : "text-[#666d77]"}`}>All events</button>
-                    <button onClick={() => setScope("mine")} className={`rounded-md px-2.5 py-1.5 text-[11px] font-bold ${scope === "mine" ? "bg-[#e5efe9] text-[#34745b]" : "text-[#666d77]"}`}>Mine · {myCount}</button>
-                  </div>
-                  <button onClick={() => { downloadIcs(demo.events.filter((event) => isIncluded(demo, event) && !event.cancelled)); flash("Downloaded your calendar (.ics)"); }} className="flex h-8 items-center gap-1.5 rounded-lg border border-[#ded9cd] bg-[#fbfaf6] px-2.5 text-[11px] font-bold text-[#596170] hover:border-[#43876e] hover:text-[#34745b]" title="Export to Google / Apple Calendar"><Download size={13} />Export</button>
-                </div>
-              ) : (
-                <button onClick={() => setEditor({ open: true, event: null })} className="flex h-9 items-center gap-1.5 rounded-lg bg-[#43876e] px-3.5 text-xs font-bold text-white shadow-[0_4px_10px_rgba(67,135,110,.15)] transition hover:bg-[#34745b]" data-testid="button-create-event"><Plus size={15} />New event</button>
-              )}
-            </div>
-
-            <section className="overflow-hidden rounded-2xl border border-[#e1dcd1] bg-[#fbfaf6]">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#e9e4d9] px-3 py-2.5 md:px-4">
-                <div className="flex items-center gap-0.5">
-                  <button onClick={() => setMonthOffset(monthOffset - 1)} className="rounded-lg p-2 text-[#737984] hover:bg-[#efede6]" aria-label="Previous month"><ArrowLeft size={16} /></button>
-                  <h2 className="display-font min-w-[140px] text-center text-[17px] font-extrabold tracking-[-.04em]">{monthLabel}</h2>
-                  <button onClick={() => setMonthOffset(monthOffset + 1)} className="rounded-lg p-2 text-[#737984] hover:bg-[#efede6]" aria-label="Next month"><ArrowRight size={16} /></button>
-                  {monthOffset !== 0 && <button onClick={() => setMonthOffset(0)} className="ml-1 rounded-md px-2 py-1 text-[11px] font-bold text-[#43876e] hover:bg-[#e5efe9]">Today</button>}
-                </div>
-                <div className="flex items-center rounded-lg border border-[#ded9cd] bg-white p-0.5">
-                  <button onClick={() => setView("month")} className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-bold ${view === "month" ? "bg-[#252c41] text-white" : "text-[#666d77]"}`}><LayoutGrid size={13} />Month</button>
-                  <button onClick={() => setView("list")} className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-bold ${view === "list" ? "bg-[#252c41] text-white" : "text-[#666d77]"}`}><List size={13} />List</button>
-                </div>
-              </div>
-
-              {view === "month" ? (
-                <MonthGrid month={month} events={monthEvents} flashId={flashId} onOpen={(event) => setDetailId(event.id)} />
-              ) : listEvents.length ? (
-                <div>
-                  {Object.entries(grouped).map(([date, dayEvents]) => (
-                    <div key={date}>
-                      <p className="mono-font bg-[#f7f5ef] px-5 py-1.5 text-[10px] font-semibold uppercase tracking-[.15em] text-[#888c8e]">{formatDay(date, { weekday: "long", month: "long", day: "numeric" })}</p>
-                      {dayEvents.map((event) => <EventRow key={event.id} event={event} included={isIncluded(demo, event)} memberMode={mode === "member"} flash={flashId === event.id} onToggle={toggle} onOpen={(e) => setDetailId(e.id)} onEdit={(e) => setEditor({ open: true, event: e })} onDelete={removeEvent} />)}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="px-6 py-14 text-center">
-                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[#e9efe8] text-[#43876e]"><CalendarDays size={23} /></div>
-                  <h3 className="display-font mt-4 text-xl font-bold">Nothing this month.</h3>
-                  <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#777d86]">{scope === "mine" && mode === "member" ? "You haven't added anything for this month. Switch to All events to browse." : "Try another month or turn more clubs on."}</p>
-                </div>
-              )}
-              <Legend />
-            </section>
+      {narrow ? (
+        <Stage width={side === "phone" ? 460 : 1140} height={side === "phone" ? 910 : 910}>
+          <div className="flex h-full items-center justify-center">{side === "phone" ? phone : browser}</div>
+        </Stage>
+      ) : (
+        <Stage width={SCENE_W} height={SCENE_H}>
+          <div className="flex h-full items-center justify-center gap-[44px]">
+            <div className="flex flex-col items-center gap-3">{phone}<p className="mono-font text-[11px] font-semibold uppercase tracking-[.18em] text-[#8a8e90]">Your phone · Slack</p></div>
+            <div className="flex flex-col items-center gap-3">{browser}<p className="mono-font text-[11px] font-semibold uppercase tracking-[.18em] text-[#8a8e90]">Your laptop · Chrome with Gather</p></div>
           </div>
-        </main>
-      </div>
-
-      {notice && (
-        <button onClick={() => notice.eventId && setDetailId(notice.eventId)} className="fade-up fixed bottom-4 right-4 z-40 flex max-w-[calc(100vw-32px)] items-center gap-2 rounded-xl border border-[#cfe2d6] bg-[#fbfaf6] px-4 py-3 text-left text-sm font-semibold text-[#34745b] shadow-lg" role="status">
-          <Check size={16} className="shrink-0" /><span className="truncate">{notice.text}</span>
-        </button>
+        </Stage>
       )}
-      {settingsOpen && <AiSettings current={apiKey} onClose={() => setSettingsOpen(false)} onSave={(key) => { setApiKey(key); setKeyState(key); setSettingsOpen(false); flash(key ? "AI is on. New chat messages go to the model" : "AI off. Using the built-in reader"); }} />}
-      {editor.open && <EventEditor event={editor.event} onClose={() => setEditor({ open: false, event: null })} onSave={saveEvent} />}
-      {detail && <EventDetail event={detail} mode={mode} included={isIncluded(demo, detail)} sourceText={demo.messages.find((m) => m.result && "eventId" in m.result && m.result.eventId === detail.id && m.result.kind === "created")?.text ?? null} onClose={() => setDetailId(null)} onToggle={() => toggle(detail)} onEdit={() => { setEditor({ open: true, event: detail }); setDetailId(null); }} onCancel={() => { cancelEvent(detail.id); flash("Event cancelled. Members were updated"); }} onDelete={() => removeEvent(detail)} />}
+
+      {settingsOpen && <AiSettings current={getApiKey()} onClose={() => setSettingsOpen(false)} onSave={(key) => { setApiKey(key); setSettingsOpen(false); setChatError(null); setSummaryNonce((n) => n + 1); }} />}
     </div>
   );
 }
@@ -297,31 +217,17 @@ function AiSettings({ current, onClose, onSave }: { current: string; onClose: ()
     <div className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <section className="fade-up w-full max-w-[440px] rounded-2xl border border-[#ded9cc] bg-[#fbfaf6] p-6 shadow-[0_24px_80px_rgba(28,35,52,.24)]" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
         <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2.5"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#f3eefe] text-[#6d4fc2]"><Sparkles size={17} /></div><h2 id="ai-settings-title" className="display-font text-xl font-bold">Live AI</h2></div>
+          <div className="flex items-center gap-2.5"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#f3eefe] text-[#6d4fc2]"><Sparkles size={17} /></div><h2 id="ai-settings-title" className="display-font text-xl font-bold">AI connection</h2></div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-[#737987] hover:bg-[#efede6]" aria-label="Close"><X size={17} /></button>
         </div>
-        <p className="mt-3 text-sm leading-6 text-[#596170]">Paste an OpenAI key to have <strong>{AI_MODEL}</strong> read chat messages and write the summary. The key stays in this browser only. Without a key, the demo uses the built-in reader.</p>
+        <p className="mt-3 text-sm leading-6 text-[#596170]">On the hosted link, AI is already connected and you don't need this. For running locally, paste an OpenAI key to use <strong>{AI_MODEL}</strong>. It stays in this browser only.</p>
         <input value={value} onChange={(e) => setValue(e.target.value.trim())} type="password" placeholder="sk-..." autoComplete="off" className="mt-4 w-full rounded-lg border border-[#d9d5ca] bg-white px-3.5 py-2.5 font-mono text-sm outline-none focus:border-[#6d4fc2]" />
         <div className="mt-5 flex justify-end gap-2">
-          {current && <button onClick={() => onSave("")} className="mr-auto rounded-lg px-3 py-2 text-xs font-bold text-[#a25d54] hover:bg-[#f7e7e2]">Turn off &amp; forget key</button>}
+          {current && <button onClick={() => onSave("")} className="mr-auto rounded-lg px-3 py-2 text-xs font-bold text-[#a25d54] hover:bg-[#f7e7e2]">Forget key</button>}
           <button onClick={onClose} className="rounded-lg px-3.5 py-2 text-xs font-bold text-[#5e6572] hover:bg-[#efede6]">Cancel</button>
           <button onClick={() => onSave(value)} disabled={!value} className="rounded-lg bg-[#6d4fc2] px-4 py-2 text-xs font-bold text-white hover:bg-[#5b3fb0] disabled:opacity-50">Save</button>
         </div>
       </section>
-    </div>
-  );
-}
-
-function Legend({ dark = false }: { dark?: boolean }) {
-  return (
-    <div className={dark ? "mt-8 px-2" : "border-t border-[#e9e4d9] px-4 py-3"}>
-      <p className={`mono-font mb-2 text-[9px] font-semibold uppercase tracking-[.18em] ${dark ? "text-[#8991a2]" : "text-[#94958f]"}`}>Color key</p>
-      <div className={dark ? "grid grid-cols-2 gap-x-2 gap-y-1.5" : "flex flex-wrap gap-x-3 gap-y-1.5"}>
-        {EVENT_TYPES.map((type) => (
-          <span key={type} className={`flex items-center gap-1.5 text-[11px] ${dark ? "text-[#d9ddd9]" : "text-[#666d77]"}`}><span className="h-2.5 w-2.5 rounded-full" style={{ background: TYPE_STYLE[type].dot }} />{TYPE_STYLE[type].label}</span>
-        ))}
-        <span className={`flex items-center gap-1.5 text-[11px] font-bold ${dark ? "text-[#f0b5aa]" : ""}`} style={dark ? undefined : { color: REQUIRED.fg }}><CircleCheck size={12} strokeWidth={2.75} />Required</span>
-      </div>
     </div>
   );
 }
