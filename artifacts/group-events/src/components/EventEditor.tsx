@@ -1,5 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
-import type { Event, EventInput, EventType } from "@workspace/api-client-react";
+import { TYPE_STYLE } from "@/demo/colors";
+import { CLUBS } from "@/demo/seed";
+import { EVENT_TYPES, type Event, type EventInput, type EventType } from "@/demo/types";
 import { CalendarDays, MapPin, X } from "lucide-react";
 
 type Props = {
@@ -9,7 +11,6 @@ type Props = {
   onSave: (input: EventInput) => void;
 };
 
-const types: EventType[] = ["meeting", "social", "service", "deadline", "fundraiser", "other"];
 
 export function EventEditor({ event, busy = false, onClose, onSave }: Props) {
   const [title, setTitle] = useState("");
@@ -19,6 +20,7 @@ export function EventEditor({ event, busy = false, onClose, onSave }: Props) {
   const [description, setDescription] = useState("");
   const [type, setType] = useState<EventType>("meeting");
   const [mandatory, setMandatory] = useState(false);
+  const [clubId, setClubId] = useState(CLUBS[0].id);
 
   useEffect(() => {
     setTitle(event?.title ?? "");
@@ -28,15 +30,17 @@ export function EventEditor({ event, busy = false, onClose, onSave }: Props) {
     setDescription(event?.description ?? "");
     setType(event?.type ?? "meeting");
     setMandatory(event?.mandatory ?? false);
+    setClubId(event?.clubId ?? CLUBS[0].id);
   }, [event]);
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     onSave({
+      clubId,
       title: title.trim(),
       date,
       startTime: startTime || null,
-      location: location.trim(),
+      location: location.trim() || "Location TBD",
       description: description.trim() || null,
       type,
       mandatory,
@@ -45,19 +49,24 @@ export function EventEditor({ event, busy = false, onClose, onSave }: Props) {
 
   return (
     <div className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <section className="fade-up w-full max-w-[560px] overflow-hidden rounded-2xl border border-[#ded9cc] bg-[#fbfaf6] shadow-[0_24px_80px_rgba(28,35,52,.24)]" role="dialog" aria-modal="true" aria-labelledby="event-editor-title">
+      <section className="fade-up w-full max-h-[92dvh] max-w-[560px] overflow-y-auto rounded-2xl border border-[#ded9cc] bg-[#fbfaf6] shadow-[0_24px_80px_rgba(28,35,52,.24)]" role="dialog" aria-modal="true" aria-labelledby="event-editor-title">
         <div className="flex items-start justify-between border-b border-[#e7e2d7] px-6 py-5">
           <div>
-            <p className="mono-font text-[10px] font-semibold uppercase tracking-[.18em] text-[#43876e]">{event ? "Organizer / edit event" : "Organizer / new event"}</p>
+            <p className="mono-font text-[10px] font-semibold uppercase tracking-[.18em] text-[#43876e]">{event ? "E-board / edit event" : "E-board / new event"}</p>
             <h2 id="event-editor-title" className="display-font mt-1 text-2xl font-bold">{event ? "Shape the details" : "Put it on the calendar"}</h2>
           </div>
           <button className="rounded-lg p-2 text-[#737987] transition hover:bg-[#efede6] hover:text-[#252c41]" onClick={onClose} aria-label="Close editor" data-testid="button-close-editor"><X size={18} /></button>
         </div>
         <form onSubmit={submit} className="space-y-4 px-6 py-5">
+          <label className="block text-sm font-semibold">Club
+            <select value={clubId} onChange={(e) => setClubId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-[#d9d5ca] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#43876e]" data-testid="select-event-club">
+              {CLUBS.map((club) => <option key={club.id} value={club.id}>{club.name}</option>)}
+            </select>
+          </label>
           <label className="block text-sm font-semibold">Event name
             <input required maxLength={180} autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Welcome week planning" className="mt-1.5 w-full rounded-lg border border-[#d9d5ca] bg-white px-3.5 py-3 text-sm outline-none transition focus:border-[#43876e] focus:ring-2 focus:ring-[#43876e]/15" data-testid="input-event-title" />
           </label>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label className="block text-sm font-semibold">Date
               <span className="relative mt-1.5 block"><CalendarDays size={16} className="pointer-events-none absolute left-3 top-3 text-[#899087]" /><input required type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-lg border border-[#d9d5ca] bg-white py-2.5 pl-9 pr-2 text-sm outline-none focus:border-[#43876e]" data-testid="input-event-date" /></span>
             </label>
@@ -65,10 +74,10 @@ export function EventEditor({ event, busy = false, onClose, onSave }: Props) {
               <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="mt-1.5 w-full rounded-lg border border-[#d9d5ca] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#43876e]" data-testid="input-event-time" />
             </label>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label className="block text-sm font-semibold">Kind
               <select value={type} onChange={(e) => setType(e.target.value as EventType)} className="mt-1.5 w-full rounded-lg border border-[#d9d5ca] bg-white px-3 py-2.5 text-sm capitalize outline-none focus:border-[#43876e]" data-testid="select-event-type">
-                {types.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+                {EVENT_TYPES.map((kind) => <option key={kind} value={kind}>{TYPE_STYLE[kind].label}</option>)}
               </select>
             </label>
             <label className="block text-sm font-semibold">Where
